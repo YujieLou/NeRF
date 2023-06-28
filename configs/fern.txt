@@ -1,0 +1,28 @@
+expname = nan1
+basedir = ./logs
+datadir = ./data/llff/fern
+dataset_type = llff
+
+factor = 4
+llffhold = 8
+
+batch_size = 8192
+chunk = 20480
+N_samples = 64
+N_importance = 128
+use_viewdirs = True
+raw_noise_std = 1e0
+
+encode_mode = 'Hash'
+netdepth = 2
+netwidth = 64
+netdepth_fine = 2
+netwidth_fine = 64
+
+i_print = 5
+i_weights = 20
+i_testset = 100
+epochs = 2000
+
+lrate = 0.005
+lrate_decay = 250

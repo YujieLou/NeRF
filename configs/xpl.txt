@@ -1,0 +1,27 @@
+expname = xpl2
+basedir = ./logs
+datadir = ./data/llff/xpl
+dataset_type = llff
+
+factor = 2
+llffhold = 8
+
+batch_size = 4096
+chunk = 4096
+N_samples = 64
+N_importance = 128
+encode_mode = 'Hash'
+
+use_viewdirs = True
+raw_noise_std = 1e0
+
+netdepth = 4
+netwidth = 128 
+netdepth_fine = 4
+netwidth_fine = 128
+
+i_print = 1000
+i_img = 10000
+i_weights = 10000
+i_testset = 10000
+epochs = 1000000
