@@ -25,4 +25,4 @@ i_testset = 100
 epochs = 2000
 
 lrate = 0.005
-lrate_decay = 250
+lrate_decay = 100

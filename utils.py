@@ -71,6 +71,7 @@ def isPointWithinPolygon(pt, poly):
     
     return True if sinsc%2==1 else False
 
+
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane
     t = -(near + rays_o[...,2]) / rays_d[...,2]

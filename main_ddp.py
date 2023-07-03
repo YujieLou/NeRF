@@ -17,10 +17,10 @@ from dataloader import load_llff_data
 seed_everything(0)
 
 def get_logger(filename, distributed_rank=0, verbosity=1, name=None):
-    if distributed_rank > 0:
-        logging_not_root = logging.getLogger(name=__name__)
-        logging_not_root.propagate = False
-        return logging_not_root
+    # if distributed_rank > 0:
+        # logging_not_root = logging.getLogger(name=__name__)
+        # logging_not_root.propagate = False
+        # return logging_not_root
     
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
     formatter = logging.Formatter(
@@ -78,6 +78,7 @@ def render(H, W, K, args, rays=None, near=0., far=1.,
     rays_d = torch.reshape(rays_d, [-1,3]).float()
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
+
     if args.use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
@@ -203,7 +204,7 @@ def main(args, logger):
         # i_test = np.arange(images.shape[0])
         
         logger.info('DEFINING BOUNDS')
-        if not args.no_ndc:
+        if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.    
         else:
@@ -228,6 +229,7 @@ def main(args, logger):
     rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
     rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
     rays_rgb = rays_rgb.astype(np.float32)
+    logger.info('Data shape {}'.format(rays_rgb.shape))
 
     if args.remove_car:
         rays_rgb = remove_car(rays_rgb)
@@ -301,15 +303,16 @@ def main(args, logger):
 
     for epoch in trange(start, epochs):
         trainloader.sampler.set_epoch(epoch)
-        for batch in trainloader:
+        for log_tag, batch in enumerate(trainloader):
             batch = batch.permute(1, 0, 2)
             batch_rays, target_s = batch[:2], batch[2]
 
             #####  Core optimization loop  #####
-            with torch.autograd.profiler.profile(enabled=True, use_cuda=True, record_shapes=False, profile_memory=False) as prof:
-                rgb, disp, acc, extras = render(H, W, K, args, rays=batch_rays, 
-                                                        model=model,
-                                                        near=near, far=far)
+            # with torch.autograd.profiler.profile(enabled=True, use_cuda=True, record_shapes=False, profile_memory=False) as prof:
+
+            rgb, disp, acc, extras = render(H, W, K, args, rays=batch_rays, 
+                                                    model=model,
+                                                    near=near, far=far)
             # print(prof.table())
             optimizer.zero_grad()
             img_loss = img2mse(rgb, target_s)
@@ -321,30 +324,31 @@ def main(args, logger):
                 img_loss0 = img2mse(extras['rgb0'], target_s)
                 loss = loss + img_loss0
                 psnr0 = mse2psnr(img_loss0)
+            # logger.info('Batch {}: Loss {}'.format(log_tag, loss.item()))
             loss.backward()
             optimizer.step()
-
             
             ###   update learning rate   ###
             decay_rate = 0.1
-            decay_steps = args.lrate_decay * 1000
+            decay_steps = 10000
             new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
             for param_group in optimizer.param_groups:
                 param_group['lr'] = new_lrate
+            global_step += 1
             ################################
-
+            logger.info('New Learning Rate {}'.format(new_lrate))
+            logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
             # Rest is logging
         if epoch%args.i_weights==0:
             path = os.path.join(args.basedir, args.expname, '{:06d}.tar'.format(epoch))
             torch.save({
                 'global_step': global_step,
                 'model_state_dict': model.module.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_state_dict': optimizer.module.state_dict(),
             }, path)
             logger.info('Saved checkpoints at {}'.format(path))
 
-        logger.info('New Learning Rate {}'.format(new_lrate))
-        logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
+
         
         if epoch%args.i_testset==0 and epoch > 0:
             testsavedir = os.path.join(args.basedir, args.expname, 'testset_{:06d}'.format(epoch))
@@ -361,7 +365,7 @@ def main(args, logger):
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
             logger.info('Saved test set')
             
-        global_step += 1
+           
 
 
 
@@ -384,4 +388,6 @@ if __name__=='__main__':
     
     logger = get_logger(os.path.join(args.basedir, args.expname, 'log.log'), args.local_rank)
     logger.info('Device ID: {}'.format(args.devices))
+    # torch.set_default_tensor_type('torch.cuda.FloatTensor')
     main(args, logger)
+    

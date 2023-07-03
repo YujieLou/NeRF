@@ -32,10 +32,11 @@ def volume_rendering(raw, z_vals, rays_d, raw_noise_std=0, device=None):
     
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)).to(device), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    weights = weights.add(0.0000001)  # 解决办法
+
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
     depth_map = torch.sum(weights * z_vals, -1)
     acc_map = torch.sum(weights, -1)
-    # weights = weights.add(0.0001)  # 解决办法
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map).to(device), depth_map / torch.sum(weights, -1))  # nan的原因的weight有0
 
     '''
@@ -187,6 +188,7 @@ class NeRF(nn.Module):
         super(NeRF, self).__init__()
         self.args = args
         if args.encode_mode == 'PE':
+            '''
             self.embed = tcnn.Encoding(n_input_dims=3, encoding_config={
                 'otype':'Frequency',
                 'n_level':16,
@@ -196,6 +198,16 @@ class NeRF(nn.Module):
                 'per_level_scale':1.5
             }).to(args.gpu)
             self.input_ch = 72
+            '''
+            embed_kwargs = {
+                'include_input' : True,
+                'multires' : 10,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+                }
+            embedder_obj = Embedder(**embed_kwargs)
+            self.embed = lambda x, eo=embedder_obj:eo.embed(x)
+            self.input_ch = embedder_obj.out_dim
         elif args.encode_mode == 'Hash':
             self.embed = tcnn.Encoding(n_input_dims=3, encoding_config={
                 'otype':'HashGrid',
@@ -210,6 +222,7 @@ class NeRF(nn.Module):
             
         self.embeddir = None
         if args.use_viewdirs:
+            '''
             self.embeddir = tcnn.Encoding(n_input_dims=3, encoding_config={
                 'otype':'Frequency',
                 'n_level':16,
@@ -219,25 +232,46 @@ class NeRF(nn.Module):
                 'per_level_scale':1.5
             }).to(args.gpu)
             self.input_ch_views = 72
+            '''
+            embeddir_kwargs = {
+                'include_input' : True,
+                'multires' : 4,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+                }
+            embedderdir_obj = Embedder(**embeddir_kwargs)
+            self.embeddir = lambda x, eo=embedderdir_obj:eo.embed(x)
+            self.input_ch_views = embedderdir_obj.out_dim
+            
+        if args.encode_mode == 'PE':
+            self.model = NeRFMLP(D=args.netdepth, W=args.netwidth,
+                                input_ch=self.input_ch, output_ch=5 if args.N_importance > 0 else 4, skips=[4],
+                                input_ch_views=self.input_ch_views, use_viewdirs=args.use_viewdirs).cuda()
+        elif args.encode_mode == 'Hash':
+            self.model = tcnn.Network(self.input_ch + self.input_ch_views, 5 if args.N_importance > 0 else 4, 
+                                network_config = {
+                                    'otype':'FullyFusedMLP',
+                                    'activation':'ReLU',
+                                    'output_activation':'None',
+                                    'n_neurons':args.netwidth,
+                                    'n_hidden_layers':args.netdepth,
+                                }).to(args.gpu)
 
-        self.model = tcnn.Network(self.input_ch + self.input_ch_views, 5 if args.N_importance > 0 else 4, 
-                            network_config = {
-                                'otype':'FullyFusedMLP',
-                                'activation':'ReLU',
-                                'output_activation':'None',
-                                'n_neurons':args.netwidth,
-                                'n_hidden_layers':args.netdepth,
-                            }).to(args.gpu)
         self.model_fine = None
         if args.N_importance > 0:
-            self.model_fine = tcnn.Network(self.input_ch + self.input_ch_views, 5 if args.N_importance > 0 else 4, 
-                            network_config = {
-                                'otype':'FullyFusedMLP',
-                                'activation':'ReLU',
-                                'output_activation':'None',
-                                'n_neurons':args.netwidth_fine,
-                                'n_hidden_layers':args.netdepth_fine,
-                            }).to(args.gpu)
+            if args.encode_mode == 'PE':
+                self.model_fine = NeRFMLP(D=args.netdepth_fine, W=args.netwidth_fine,
+                                    input_ch=self.input_ch, output_ch=5 if args.N_importance > 0 else 4, skips=[4],
+                                    input_ch_views=self.input_ch_views, use_viewdirs=args.use_viewdirs).cuda()
+            elif args.encode_mode == 'Hash':
+                self.model_fine = tcnn.Network(self.input_ch + self.input_ch_views, 5 if args.N_importance > 0 else 4, 
+                                    network_config = {
+                                        'otype':'FullyFusedMLP',
+                                        'activation':'ReLU',
+                                        'output_activation':'None',
+                                        'n_neurons':args.netwidth_fine,
+                                        'n_hidden_layers':args.netdepth_fine,
+                                    }).to(args.gpu)
 
         self.status = 'train'
 
@@ -270,6 +304,8 @@ class NeRF(nn.Module):
         inputs_pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
         inputs_pts_flat = torch.reshape(inputs_pts, [-1, inputs_pts.shape[-1]])
         # 65536, 3 --->  65536, 63
+
+        
         embedded = self.embed(inputs_pts_flat)
         if directions is not None:
             input_dirs = directions[:,None].expand(inputs_pts.shape)

@@ -1,12 +1,12 @@
-expname = opl1_1
+expname = 0629A-bad
 basedir = ./logs
-datadir = ./data/llff/Openline1
+datadir = ./data/llff/A-mismatch
 dataset_type = llff
 
 factor = 1
 llffhold = 4
 
-batch_size = 20480
+batch_size = 10240
 chunk = 20480
 N_samples = 64
 N_importance = 128
@@ -14,15 +14,15 @@ use_viewdirs = True
 raw_noise_std = 1e0
 
 encode_mode = 'Hash'
-netdepth = 2
-netwidth = 64
-netdepth_fine = 2
-netwidth_fine = 64
+netdepth = 4
+netwidth = 128
+netdepth_fine = 4
+netwidth_fine = 128
 
 i_print = 5
-i_weights = 50
-i_testset = 50
-epochs = 2000
+i_weights = 10
+i_testset = 10
+epochs = 200
 
 lrate = 0.005
 lrate_decay = 250

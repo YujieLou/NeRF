@@ -1,0 +1,28 @@
+expname = 0703A-good
+basedir = ./logs
+datadir = ./data/llff/A-good
+dataset_type = llff
+
+factor = 1
+llffhold = 4
+
+batch_size = 10240
+chunk = 20480
+N_samples = 64
+N_importance = 128
+use_viewdirs = True
+raw_noise_std = 1e0
+
+encode_mode = 'Hash'
+netdepth = 4
+netwidth = 128
+netdepth_fine = 4
+netwidth_fine = 128
+
+i_print = 5
+i_weights = 10
+i_testset = 10
+epochs = 200
+
+lrate = 0.005
+lrate_decay = 250
