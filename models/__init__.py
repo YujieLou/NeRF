@@ -1,1 +1,1 @@
-from .nerf import NeRF, Embedder
+from .nerf import NeRF, NGP

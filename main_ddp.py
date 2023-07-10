@@ -1,9 +1,8 @@
 import os
-import logging
 import time
 import imageio
 import numpy as np
-from tqdm import tqdm, trange
+from tqdm import tqdm
 import configargparse
 
 import torch
@@ -11,35 +10,10 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from utils import *
-from models import NeRF
+from models import NeRF, NGP
 from dataloader import load_llff_data
 
 seed_everything(0)
-
-def get_logger(filename, distributed_rank=0, verbosity=1, name=None):
-    # if distributed_rank > 0:
-        # logging_not_root = logging.getLogger(name=__name__)
-        # logging_not_root.propagate = False
-        # return logging_not_root
-    
-    level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
-    formatter = logging.Formatter(
-        "[%(asctime)s][%(filename)s][line:%(lineno)d][%(levelname)s] %(message)s"
-    )
-    logger = logging.getLogger(name)
-    logger.setLevel(level_dict[verbosity])
- 
-    fh = logging.FileHandler(filename, "w")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
- 
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    logger.addHandler(sh)
- 
-    return logger
-
-
 
 def render(H, W, K, args, rays=None, near=0., far=1., 
            c2w_staticcam=None, model=None):
@@ -147,19 +121,16 @@ def config_parser():
     parser.add_argument("--factor", type=int, default=8, help='downsample factor for LLFF images')
     parser.add_argument("--llffhold", type=int, default=8, help='will take every 1/N images as LLFF test set, paper uses 8')
     parser.add_argument("--no_ndc", action='store_true', help='do not use normalized device coordinates (set for non-forward facing scenes)')
+    parser.add_argument("--contract", action='store_true', help='contract in mip nerf 360')
     parser.add_argument("--lindisp", action='store_true', help='sampling linearly in disparity rather than depth')
     parser.add_argument("--spherify", action='store_true', help='set for spherical 360 scenes')
 
     # training options
-    parser.add_argument("--encode_mode", type=str, default='PE', help='encoding mode, options: PE / Hash')
-    parser.add_argument("--netdepth", type=int, default=8, help='layers in network')
-    parser.add_argument("--netwidth", type=int, default=256, help='channels per layer')
-    parser.add_argument("--netdepth_fine", type=int, default=8, help='layers in fine network')
-    parser.add_argument("--netwidth_fine", type=int, default=256, help='channels per layer in fine network')
-    parser.add_argument("--epochs",   type=int, default=50000)
+    parser.add_argument("--Model", type=str, default='NeRF', help='options: NeRF / NGP')
+    parser.add_argument("--epochs",   type=int, default=50000, help='epochs')
     parser.add_argument("--batch_size", type=int, default=32*32, help='batch size (number of random rays per gradient step)')
     parser.add_argument("--lrate", type=float, default=5e-4, help='learning rate')
-    parser.add_argument("--lrate_decay", type=int, default=250, help='exponential learning rate decay (in 1000 steps)')
+    parser.add_argument("--lrate_x", type=float, default=1, help='epoch num for learning rate decay 0.1 times')
     parser.add_argument("--chunk", type=int, default=1024*32,help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--checkpoint", type=str, default=None, help='specific weights npy file to reload for coarse network')
     
@@ -173,13 +144,14 @@ def config_parser():
     parser.add_argument("--render_factor", type=int, default=0, help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=1000, help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_weights", type=int, default=10000, help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, help='frequency of testset saving')
+    parser.add_argument("--i_print",   type=int, default=10, help='frequency of console printout and metric loggin')
+    parser.add_argument("--i_weights", type=int, default=10, help='frequency of weight ckpt saving')
+    parser.add_argument("--i_testset", type=int, default=50, help='frequency of testset saving')
     
     parser.add_argument("--remove_car", action='store_true',  help='remove cars in images')
     parser.add_argument("--render_only", action='store_true',  help='only test')
-    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--local_rank", type=int, default=-1,  help='gpu id')
+    parser.add_argument("--gpus", action='store_true',  help='many gpus')
     
     return parser
 
@@ -201,7 +173,10 @@ def main(args, logger):
             i_test = np.arange(images.shape[0])[::args.llffhold]
 
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if (i not in i_test)])
-        # i_test = np.arange(images.shape[0])
+
+        # train all test all
+        i_train = np.arange(images.shape[0])
+        i_test = i_train
         
         logger.info('DEFINING BOUNDS')
         if args.no_ndc:
@@ -249,16 +224,20 @@ def main(args, logger):
     #####################
     # Create nerf model
     #####################
-    model = NeRF(args)
+    if args.Model == 'NeRF':
+        model = NeRF(args)
+    elif args.Model == 'NGP':
+        model = NGP(args)
 
         
     # Create optimizer
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=args.lrate, betas=(0.9, 0.999), eps=1e-15, weight_decay=0.000001)
 
     #####################
     # Load checkpoints
     #####################
     start = 0
+    global_step = 0
     if args.checkpoint is not None and args.checkpoint!='None':
         ckpts = [args.checkpoint]
     else:
@@ -270,7 +249,8 @@ def main(args, logger):
         logger.info('Reloading from {}'.format(ckpt_path))
         ckpt = torch.load(ckpt_path)
 
-        start = ckpt['global_step']
+        start = ckpt['start']
+        global_step = ckpt['global_step']
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
         # Load model
@@ -281,12 +261,14 @@ def main(args, logger):
 
 
     if args.render_only:
+        model.status = 'test'
         dir = os.path.join(args.basedir, args.expname, 'render_only_{:06d}'.format(start))
         os.makedirs(dir, exist_ok=True)
         with torch.no_grad():
-            rgbs, disps = test(render_poses, hwf, K, 
+            rgbs, disps = test(poses[i_test], hwf, K, 
                                model, 
                                args, near, far, savedir=dir, logger=logger)
+        model.status = 'train'
         return 
 
     #####################
@@ -296,14 +278,14 @@ def main(args, logger):
     logger.info('TRAIN views are {}'.format(i_train))
     logger.info('TEST views are {}'.format(i_test))
     
-    global_step = start
+    batch_num = len(trainloader)
     epochs = args.epochs+1
     start = start + 1
-    # i_batch = 0
 
-    for epoch in trange(start, epochs):
+    for epoch in range(start, epochs):
         trainloader.sampler.set_epoch(epoch)
-        for log_tag, batch in enumerate(trainloader):
+        t_bar = tqdm(total=len(trainloader))
+        for batch in trainloader:# , desc='Training Epoch {}:'.format(epoch)):
             batch = batch.permute(1, 0, 2)
             batch_rays, target_s = batch[:2], batch[2]
 
@@ -325,31 +307,35 @@ def main(args, logger):
                 loss = loss + img_loss0
                 psnr0 = mse2psnr(img_loss0)
             # logger.info('Batch {}: Loss {}'.format(log_tag, loss.item()))
+            # with torch.autograd.detect_anomaly():
             loss.backward()
             optimizer.step()
             
             ###   update learning rate   ###
             decay_rate = 0.1
-            decay_steps = 10000
+            decay_steps = batch_num * args.lrate_x
             new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
             for param_group in optimizer.param_groups:
                 param_group['lr'] = new_lrate
             global_step += 1
+
+            t_bar.update(1)
+            t_bar.set_description('[TRAIN] Epoch {}/{} Loss {} PSNR {}:'.format(epoch, epochs, '%.4f'%loss.item(), '%.4f'%psnr.item()))
+            t_bar.refresh()
             ################################
-            logger.info('New Learning Rate {}'.format(new_lrate))
-            logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
+        logger.info('New Learning Rate {}'.format(new_lrate))
+        logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
             # Rest is logging
         if epoch%args.i_weights==0:
             path = os.path.join(args.basedir, args.expname, '{:06d}.tar'.format(epoch))
             torch.save({
+                'start': epoch,
                 'global_step': global_step,
                 'model_state_dict': model.module.state_dict(),
-                'optimizer_state_dict': optimizer.module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
             }, path)
             logger.info('Saved checkpoints at {}'.format(path))
 
-
-        
         if epoch%args.i_testset==0 and epoch > 0:
             testsavedir = os.path.join(args.basedir, args.expname, 'testset_{:06d}'.format(epoch))
             os.makedirs(testsavedir, exist_ok=True)
@@ -372,6 +358,15 @@ def main(args, logger):
 if __name__=='__main__':
     parser = config_parser()
     args = parser.parse_args()
+
+    args.expname = '{}-{}_{}_{}'.format(args.datadir.split('/')[-2], args.factor, args.Model,  args.expname )
+    if not args.no_ndc:
+        args.expname = args.expname + '_NDC'
+    if args.lindisp:
+        args.expname = args.expname + '_lind'
+    if args.contract:
+        args.expname = args.expname + '_contract'
+        
     os.makedirs(os.path.join(args.basedir, args.expname), exist_ok=True)
     f = os.path.join(args.basedir, args.expname, 'args.txt')
 
@@ -380,13 +375,16 @@ if __name__=='__main__':
             attr = getattr(args, arg)
             file.write('{} = {}\n'.format(arg, attr))
 
+    os.system('cp models/nerf.py {}/{}/nerf.py'.format(args.basedir, args.expname))
+    os.system('cp main_ddp.py {}/{}/main_ddp.py'.format(args.basedir, args.expname))
+
     args.local_rank = int(args.local_rank)
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group(backend='nccl')
     args.devices = [args.local_rank]
     args.gpu = torch.device(f'cuda:{args.local_rank:d}')
     
-    logger = get_logger(os.path.join(args.basedir, args.expname, 'log.log'), args.local_rank)
+    logger = get_logger(os.path.join(args.basedir, args.expname, 'log.log'), args.local_rank, args.gpus)
     logger.info('Device ID: {}'.format(args.devices))
     # torch.set_default_tensor_type('torch.cuda.FloatTensor')
     main(args, logger)
