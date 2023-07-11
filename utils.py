@@ -1,5 +1,6 @@
 import os
 import random 
+import logging
 import numpy as np 
 import torch
 import torch.nn as nn
@@ -143,3 +144,26 @@ def remove_car(rays_rgb):
     return rays_rgb
     
 
+def get_logger(filename, distributed_rank=0, gpus=False, verbosity=1, name=None):
+    if gpus:
+        if distributed_rank > 0:
+            logging_not_root = logging.getLogger(name=__name__)
+            logging_not_root.propagate = False
+            return logging_not_root
+    
+    level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
+    formatter = logging.Formatter(
+        "[%(asctime)s][%(filename)s][line:%(lineno)d][%(levelname)s] %(message)s"
+    )
+    logger = logging.getLogger(name)
+    logger.setLevel(level_dict[verbosity])
+ 
+    fh = logging.FileHandler(filename, "w")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+ 
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+ 
+    return logger
