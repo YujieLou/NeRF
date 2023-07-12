@@ -1,28 +1,26 @@
-expname = nan1
-basedir = ./logs
-datadir = ./data/llff/fern
+expname = test
+basedir = ./logs/0710/
+datadir = fern
 dataset_type = llff
 
 factor = 4
 llffhold = 8
 
-batch_size = 8192
-chunk = 20480
+batch_size = 4096
+chunk = 4096
 N_samples = 64
 N_importance = 128
+multires = 10
+multires_views = 4
 use_viewdirs = True
 raw_noise_std = 1e0
 
-encode_mode = 'Hash'
-netdepth = 2
-netwidth = 64
-netdepth_fine = 2
-netwidth_fine = 64
+Model = 'NeRF'
 
-i_print = 5
-i_weights = 20
-i_testset = 100
-epochs = 2000
+i_print = 1
+i_weights = 1
+i_testset = 10
+epochs = 10
 
-lrate = 0.005
-lrate_decay = 100
+lrate = 0.01
+lrate_x = 5

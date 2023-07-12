@@ -45,7 +45,8 @@ def render(H, W, K, args, rays=None, near=0., far=1.,
     sh = rays_d.shape # [..., 3]
     if not args.no_ndc:
         # for forward facing scenes
-        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
+        # rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
+        rays_o, rays_d = ndc_rays(H, W, K[0][0], args.near_fake, rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
@@ -88,8 +89,8 @@ def test(render_poses, hwf, K, model, args, near, far, savedir=None, render_fact
         focal = focal/render_factor
 
     rgbs, disps = [], []
-
-    for i, c2w in enumerate(tqdm(render_poses)):
+    t_bar = tqdm(total=len(render_poses))
+    for i, c2w in enumerate(render_poses):
         t = time.time()
         rays = get_rays(H, W, K, c2w[:3,:4])
         rgb, disp, acc, _ = render(H, W, K, rays = rays, 
@@ -101,7 +102,9 @@ def test(render_poses, hwf, K, model, args, near, far, savedir=None, render_fact
         if savedir is not None:
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, to8b(rgbs[-1]))
-        logger.info('[Test] Image id :{}  Time consume : {}'.format(i, time.time() - t))
+        t_bar.update(1)
+        t_bar.set_description('[Test] Image id :{}  Time consume : {}'.format(i, time.time() - t))
+        t_bar.refresh()
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
 
@@ -185,6 +188,7 @@ def main(args, logger):
         else:
             near = 0.
             far = 1.
+        args.near_fake = np.ndarray.min(bds) * .9
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -320,14 +324,14 @@ def main(args, logger):
             global_step += 1
 
             t_bar.update(1)
-            t_bar.set_description('[TRAIN] Epoch {}/{} Loss {} PSNR {}:'.format(epoch, epochs, '%.4f'%loss.item(), '%.4f'%psnr.item()))
+            t_bar.set_description('[TRAIN] Epoch {}/{} Loss {} PSNR {}:'.format(epoch, epochs-1, '%.4f'%loss.item(), '%.4f'%psnr.item()))
             t_bar.refresh()
             ################################
         logger.info('New Learning Rate {}'.format(new_lrate))
         logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
             # Rest is logging
         if epoch%args.i_weights==0:
-            path = os.path.join(args.basedir, args.expname, '{:06d}.tar'.format(epoch))
+            path = os.path.join(args.basedir, args.expname, '{:06d}_{}.tar'.format(epoch, psnr.item()))
             torch.save({
                 'start': epoch,
                 'global_step': global_step,
@@ -359,7 +363,8 @@ if __name__=='__main__':
     parser = config_parser()
     args = parser.parse_args()
 
-    args.expname = '{}-{}_{}_{}'.format(args.datadir.split('/')[-2], args.factor, args.Model,  args.expname )
+    args.expname = '{}-{}_{}_{}'.format(args.datadir, args.factor, args.Model,  args.expname )
+    args.datadir = './data/{}/{}/'.format(args.dataset_type, args.datadir)
     if not args.no_ndc:
         args.expname = args.expname + '_NDC'
     if args.lindisp:

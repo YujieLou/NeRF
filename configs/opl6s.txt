@@ -1,6 +1,6 @@
 expname = test
 basedir = ./logs/0710/
-datadir = opl1
+datadir = opl6s
 dataset_type = llff
 
 factor = 4
@@ -24,4 +24,3 @@ epochs = 10
 
 lrate = 0.01
 lrate_x = 5
-

@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time 
+
 
 
 
@@ -74,7 +76,6 @@ def isPointWithinPolygon(pt, poly):
 
 
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
-    # Shift ray origins to near plane
     t = -(near + rays_o[...,2]) / rays_d[...,2]
     rays_o = rays_o + t[...,None] * rays_d
     

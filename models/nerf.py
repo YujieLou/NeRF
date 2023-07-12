@@ -265,7 +265,7 @@ class NeRF(nn.Module):
         '''
         embed_kwargs = {
             'include_input' : True,
-            'multires' : 10,
+            'multires' : args.multires,
             'log_sampling' : True,
             'periodic_fns' : [torch.sin, torch.cos],
             }
@@ -273,7 +273,6 @@ class NeRF(nn.Module):
         self.embed = lambda x, eo=embedder_obj:eo.embed(x)
         self.input_ch = embedder_obj.out_dim
 
-            
         self.embeddir = None
         if args.use_viewdirs:
             '''
@@ -289,7 +288,7 @@ class NeRF(nn.Module):
             '''
             embeddir_kwargs = {
                 'include_input' : True,
-                'multires' : 4,
+                'multires' : args.multires_views,
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
                 }
@@ -342,14 +341,10 @@ class NeRF(nn.Module):
         inputs_pts_flat = torch.reshape(inputs_pts, [-1, inputs_pts.shape[-1]])
         if self.args.contract:
             inputs_pts_flat = contract(inputs_pts_flat)
-
-
-        # 65536, 3 --->  65536, 63
         embedded = self.embed(inputs_pts_flat)
         if directions is not None:
             input_dirs = directions[:,None].expand(inputs_pts.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-        # 65536, 3 --->  65536, 27
         embedded_dirs = self.embeddir(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
         # embedded = embedded.to(dtype=torch.float32)
@@ -420,14 +415,15 @@ class NGP(nn.Module):
         super(NGP, self).__init__()
         self.args = args
 
-        self.n_levels = 16 # 16  调高能够提高远近物体的分离度  效果很小很小
+        self.n_levels = 32 # 16  调高能够提高远近物体的分离度  效果很小很小
         self.n_features_per_level = 2
-        self.log2_hashmap_size = 19   # 哈希表的尺寸？  严重影响运行速度
+        self.log2_hashmap_size = 19 # 19   # 哈希表的尺寸？  严重影响运行速度
         self.max_resolution = 4096
         self.base_resolution = 16
         self.per_level_scale = np.exp(
             (np.log(self.max_resolution) - np.log(self.base_resolution)) / (self.n_levels - 1)
         ).tolist()
+        
         self.embed = tcnn.Encoding(n_input_dims=3, encoding_config={
                 'otype':'HashGrid',
                 'n_level':self.n_levels,
@@ -460,13 +456,13 @@ class NGP(nn.Module):
         # D=2, W=64
         # D=4, W=128
         # D=8, W=256
-        self.model = NeRFMLP(D=2, W=64,
+        self.model = NeRFMLP(D=4, W=128,
                             input_ch=self.input_ch, output_ch=5 if args.N_importance > 0 else 4, skips=[4],
                             input_ch_views=self.input_ch_views, use_viewdirs=args.use_viewdirs).cuda()
 
         self.model_fine = None
         if args.N_importance > 0:
-            self.model_fine = NeRFMLP(D=2, W=64,
+            self.model_fine = NeRFMLP(D=4, W=128,
                                 input_ch=self.input_ch, output_ch=5 if args.N_importance > 0 else 4, skips=[4],
                                 input_ch_views=self.input_ch_views, use_viewdirs=args.use_viewdirs).cuda()
         self.status = 'train'
@@ -479,12 +475,15 @@ class NGP(nn.Module):
         near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
         t_vals = torch.linspace(0., 1., steps=self.args.N_samples).to(self.args.gpu)
+        
+        # print(' t_vals', t_vals,t_vals.shape)
         if not self.args.lindisp:
             z_vals = near * (1.-t_vals) + far * (t_vals)
         else:
             z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
         z_vals = z_vals.expand([N_rays, self.args.N_samples])
+        # print('z_vals1', z_vals, z_vals.shape)
         
         if self.status == 'train':
             # get intervals between samples
@@ -495,12 +494,17 @@ class NGP(nn.Module):
             t_rand = torch.rand(z_vals.shape).to(self.args.gpu)
             z_vals = lower + (upper - lower) * t_rand
 
-  
+        # print('z_vals2', z_vals, z_vals.shape)
+        # print('z_vals[...,:,None]', z_vals[...,:,None])
         inputs_pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
         inputs_pts_flat = torch.reshape(inputs_pts, [-1, inputs_pts.shape[-1]])
         # 65536, 3 --->  65536, 63
+
         if self.args.contract:
             inputs_pts_flat = contract(inputs_pts_flat)
+        # print('inputs_pts_flat', inputs_pts_flat)
+        # print('max0', torch.max(inputs_pts_flat[:, 0]))
+        # print('min0', torch.min(inputs_pts_flat[:, 0]))
         embedded = self.embed(inputs_pts_flat)
         if directions is not None:
             input_dirs = directions[:,None].expand(inputs_pts.shape)
@@ -538,7 +542,9 @@ class NGP(nn.Module):
             embedded_dirs = self.embeddir(input_dirs_flat)
             embedded = torch.cat([embedded, embedded_dirs], -1)
             embedded = embedded.to(dtype=torch.float32)
+
             outputs_flat = self.model_fine(embedded)
+
             outputs = torch.reshape(outputs_flat, list(inputs_pts.shape[:-1]) + [outputs_flat.shape[-1]])
 
             rgb_map, disp_map, acc_map, weights, depth_map = volume_rendering(outputs, z_vals, rays_d, 
@@ -558,6 +564,11 @@ class NGP(nn.Module):
         for k in ret:
             if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()):
                 print(f"! [Numerical Error] {k} contains nan or inf.")
+                # torch.set_printoptions(profile="full")
+                # print('inputs_pts_flat', inputs_pts_flat)
+                # print('input_dirs_flat', input_dirs_flat)
+                # print('outputs_flat', outputs_flat)
+                # print('rgb_map', rgb_map)
         return ret
 
 

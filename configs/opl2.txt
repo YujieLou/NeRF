@@ -1,29 +1,26 @@
-expname = Openline2
-basedir = ./logs
-datadir = ./data/llff/Openline2
+expname = test
+basedir = ./logs/0710/
+datadir = opl2
 dataset_type = llff
 
-factor = 1
-llffhold = 4
+factor = 4
+llffhold = 8
 
-batch_size = 10240
-chunk = 20480
+batch_size = 4096
+chunk = 4096
 N_samples = 64
 N_importance = 128
+multires = 10
+multires_views = 4
 use_viewdirs = True
 raw_noise_std = 1e0
 
-encode_mode = 'Hash'
-netdepth = 4
-netwidth = 128
-netdepth_fine = 4
-netwidth_fine = 128
+Model = 'NeRF'
 
-i_print = 5
-i_weights = 10
+i_print = 1
+i_weights = 1
 i_testset = 10
-epochs = 200
+epochs = 10
 
-lrate = 0.005
-lrate_decay = 250
-
+lrate = 0.01
+lrate_x = 5
