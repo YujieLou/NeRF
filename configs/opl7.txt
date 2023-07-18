@@ -1,9 +1,9 @@
-expname = test
-basedir = ./logs/0712/
-datadir = opl3
+expname = t11111
+basedir = ./logs/0710/
+datadir = opl6
 dataset_type = llff
 
-factor = 1
+factor = 8
 llffhold = 8
 
 batch_size = 4096
@@ -24,4 +24,3 @@ epochs = 1
 
 lrate = 0.01
 lrate_x = 1
-

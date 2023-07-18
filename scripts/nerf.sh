@@ -10,5 +10,3 @@ python -m torch.distributed.launch --nproc_per_node 1 --master_port 60661 main_d
 python -m torch.distributed.launch --nproc_per_node 1 --master_port 60662 main_ddp.py configs/opl3.txt --local_rank 1
 python -m torch.distributed.launch --nproc_per_node 1 --master_port 60663 main_ddp.py configs/opl3.txt --local_rank 0
 
-
-python -m torch.distributed.launch --nproc_per_node 4 --master_port 60663 main_ddp.py configs/opl6s.txt --lindisp --no_dnc

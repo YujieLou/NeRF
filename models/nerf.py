@@ -33,6 +33,27 @@ def contract(x: torch.Tensor, radius: float=1.0):
     return x*msk + ~msk * (1 + radius - radius / x_norm) * x / x_norm
 
 
+def contract_to_unisphere(x, aabb, ord=2, eps=1e-6, derivative=False):
+    x = (x - aabb[0])/(aabb[1] - aabb[0])
+    x = x * 2 - 1
+    mag = torch.linalg.norm(x, ord=ord, dim=-1, keepdim=True)
+    mask = mag.squeeze(-1) > 1
+
+    if derivative:
+        dev = (2 * mag - 1) / mag**2 + 2 * x ** 2 * (
+            1 / mag ** 3 - (2 * mag - 1) / mag **4
+        )
+        dev[~mask] = 1.0
+        dev = torch.clamp(dev, min=eps)
+        return dev 
+    else:
+        x[mask] = (2 - 1 / mag[mask] * (x[mask] / mag[mask]))
+        x = x / 4 + 0.5
+        
+        return x
+    
+
+
 def volume_rendering(raw, z_vals, rays_d, raw_noise_std=0, device=None):
     """Transforms model's predictions to semantically meaningful values.
     Args:
@@ -56,7 +77,6 @@ def volume_rendering(raw, z_vals, rays_d, raw_noise_std=0, device=None):
     noise = 0.
     if raw_noise_std > 0.:
         noise = torch.randn(raw[...,3].shape).to(device) * raw_noise_std
-    # kkk = copy.deepcopy(dists)
     
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)).to(device), 1.-alpha + 1e-10], -1), -1)[:, :-1]
@@ -76,49 +96,11 @@ def volume_rendering(raw, z_vals, rays_d, raw_noise_std=0, device=None):
         midd = raw[...,3]
         # print('alpha', alpha.shape, alpha[idx], '\n')
         print('raw[...,3]', midd.shape)
-        print('kkk', kkk.shape, kkk[idx], '\n')
         # print('z_vals', z_vals.shape, z_vals[idx])
         # print('acc_map', acc_map.shape, acc_map[idx], '\n')
         torch.set_printoptions(profile='default')
     '''
     return rgb_map, disp_map, acc_map, weights, depth_map
-
-
-def volume_rendering_ngp(raw, z_vals, rays_d, density, raw_noise_std=0, device=None):
-    """Transforms model's predictions to semantically meaningful values.
-    Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
-        rays_d: [num_rays, 3]. Direction of each ray.
-    Returns:
-        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map. Inverse of depth map.
-        acc_map: [num_rays]. Sum of weights along each ray.
-        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Estimated distance to object.
-    """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
-    dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape).to(device)], -1)  # [N_rays, N_samples]
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    
-    rgb = torch.sigmoid(raw)  # [N_rays, N_samples, 3]
-    density = torch.reshape(density, [raw.shape[0], raw.shape[1]])
-    noise = 0.
-    if raw_noise_std > 0.:
-        noise = torch.randn(density.shape).to(device) * raw_noise_std
-    alpha = raw2alpha(density + noise, dists)  # [N_rays, N_samples]
-    
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)).to(device), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-    weights = weights.add(0.0000001)  # 解决办法
-    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-    depth_map = torch.sum(weights * z_vals, -1)
-    acc_map = torch.sum(weights, -1)
-    disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map).to(device), depth_map / torch.sum(weights, -1))  # nan的原因的weight有0
-
-    return rgb_map, disp_map, acc_map, weights, depth_map
-
 
 
 # Hierarchical sampling (section 5.2)
@@ -415,14 +397,15 @@ class NGP(nn.Module):
         super(NGP, self).__init__()
         self.args = args
 
-        self.n_levels = 32 # 16  调高能够提高远近物体的分离度  效果很小很小
-        self.n_features_per_level = 2
-        self.log2_hashmap_size = 19 # 19   # 哈希表的尺寸？  严重影响运行速度
-        self.max_resolution = 4096
-        self.base_resolution = 16
+        self.n_levels = args.n_levels       # 16 number of levels 
+        self.n_features_per_level = args.n_features_per_level  # 1,2,4,8 number of feature dimensions per entry 
+        self.log2_hashmap_size = args.log2_hashmap_size    # 14 ~ 24 max entries per level (hash table size)
+        self.max_resolution = args.max_resolution    # finest resolution   512 to 524288
+        self.base_resolution = 16      # coarsest resolution 
         self.per_level_scale = np.exp(
             (np.log(self.max_resolution) - np.log(self.base_resolution)) / (self.n_levels - 1)
         ).tolist()
+        print(self.per_level_scale)
         
         self.embed = tcnn.Encoding(n_input_dims=3, encoding_config={
                 'otype':'HashGrid',
@@ -437,6 +420,7 @@ class NGP(nn.Module):
         
         self.embeddir = None
         if args.use_viewdirs:
+            # '''
             self.embeddir = tcnn.Encoding(
                 n_input_dims=3,
                 encoding_config={
@@ -452,6 +436,18 @@ class NGP(nn.Module):
                 }                 
             ).to(args.gpu)
             self.input_ch_views = 16
+            '''
+
+            embeddir_kwargs = {
+                'include_input' : True,
+                'multires' : args.multires_views,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+                }
+            embedderdir_obj = Embedder(**embeddir_kwargs)
+            self.embeddir = lambda x, eo=embedderdir_obj:eo.embed(x)
+            self.input_ch_views = embedderdir_obj.out_dim
+            '''
 
         # D=2, W=64
         # D=4, W=128
@@ -502,6 +498,9 @@ class NGP(nn.Module):
 
         if self.args.contract:
             inputs_pts_flat = contract(inputs_pts_flat)
+        if self.args.no_ndc and self.args.aabb:
+            inputs_pts_flat = contract_to_unisphere(inputs_pts_flat, self.args.aabb_)
+        
         # print('inputs_pts_flat', inputs_pts_flat)
         # print('max0', torch.max(inputs_pts_flat[:, 0]))
         # print('min0', torch.min(inputs_pts_flat[:, 0]))
@@ -533,6 +532,8 @@ class NGP(nn.Module):
             inputs_pts_flat = torch.reshape(inputs_pts, [-1, inputs_pts.shape[-1]])
             if self.args.contract:
                 inputs_pts_flat = contract(inputs_pts_flat)
+            if self.args.no_ndc and self.args.aabb:
+                inputs_pts_flat = contract_to_unisphere(inputs_pts_flat)
             # 65536, 3 --->  65536, 63
             embedded = self.embed(inputs_pts_flat)
             if directions is not None:
@@ -570,6 +571,3 @@ class NGP(nn.Module):
                 # print('outputs_flat', outputs_flat)
                 # print('rgb_map', rgb_map)
         return ret
-
-
-

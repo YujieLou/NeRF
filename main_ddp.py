@@ -45,8 +45,7 @@ def render(H, W, K, args, rays=None, near=0., far=1.,
     sh = rays_d.shape # [..., 3]
     if not args.no_ndc:
         # for forward facing scenes
-        # rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
-        rays_o, rays_d = ndc_rays(H, W, K[0][0], args.near_fake, rays_o, rays_d)
+        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
@@ -61,7 +60,6 @@ def render(H, W, K, args, rays=None, near=0., far=1.,
     all_ret = {}
     for i in range(0, rays.shape[0], args.chunk):
         ret = model(rays[i:i+args.chunk])
-    
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -117,9 +115,9 @@ def config_parser():
     parser.add_argument('config', is_config_file=True,   help='config file path')
     parser.add_argument("--expname", type=str,  help='experiment name')
     parser.add_argument("--basedir", type=str, default='./logs/', help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default='./data/llff/fern', help='input data directory')
 
     # dataset options
+    parser.add_argument("--datadir", type=str, default='fern', help='input data directory')
     parser.add_argument("--dataset_type", type=str, default='llff', help='options: llff / blender / deepvoxels')
     parser.add_argument("--factor", type=int, default=8, help='downsample factor for LLFF images')
     parser.add_argument("--llffhold", type=int, default=8, help='will take every 1/N images as LLFF test set, paper uses 8')
@@ -150,11 +148,19 @@ def config_parser():
     parser.add_argument("--i_print",   type=int, default=10, help='frequency of console printout and metric loggin')
     parser.add_argument("--i_weights", type=int, default=10, help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50, help='frequency of testset saving')
-    
+    parser.add_argument("--n_levels", type=int, default=19)
+    parser.add_argument("--n_features_per_level", type=int, default=2)
+    parser.add_argument("--log2_hashmap_size", type=int, default=16)
+    parser.add_argument("--max_resolution", type=int, default=4096)
+    parser.add_argument("--base_resolution", type=int, default=16)
+
     parser.add_argument("--remove_car", action='store_true',  help='remove cars in images')
     parser.add_argument("--render_only", action='store_true',  help='only test')
     parser.add_argument("--local_rank", type=int, default=-1,  help='gpu id')
     parser.add_argument("--gpus", action='store_true',  help='many gpus')
+    parser.add_argument("--test_all", action='store_true',  help='test all location')
+    parser.add_argument("--aabb", action='store_true',  help=' ')
+    
     
     return parser
 
@@ -177,18 +183,18 @@ def main(args, logger):
 
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if (i not in i_test)])
 
-        # train all test all
-        i_train = np.arange(images.shape[0])
-        i_test = i_train
+        if args.test_all:
+            i_test = np.arange(images.shape[0])
         
         logger.info('DEFINING BOUNDS')
+        print('bds', bds, bds.shape)
         if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.    
         else:
             near = 0.
             far = 1.
-        args.near_fake = np.ndarray.min(bds) * .9
+        args.aabb_ = np.array([np.ndarray.min(bds) * .9, np.ndarray.max(bds) * 1.])
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -260,17 +266,14 @@ def main(args, logger):
         # Load model
         model.load_state_dict(ckpt['model_state_dict'])
 
-    model = DDP(model, device_ids=[args.local_rank],output_device=args.local_rank)
-
-
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
 
     if args.render_only:
         model.status = 'test'
         dir = os.path.join(args.basedir, args.expname, 'render_only_{:06d}'.format(start))
         os.makedirs(dir, exist_ok=True)
         with torch.no_grad():
-            rgbs, disps = test(poses[i_test], hwf, K, 
-                               model, 
+            rgbs, disps = test(poses[i_test], hwf, K, model, 
                                args, near, far, savedir=dir, logger=logger)
         model.status = 'train'
         return 
@@ -283,13 +286,12 @@ def main(args, logger):
     logger.info('TEST views are {}'.format(i_test))
     
     batch_num = len(trainloader)
-    epochs = args.epochs+1
     start = start + 1
 
-    for epoch in range(start, epochs):
-        trainloader.sampler.set_epoch(epoch)
-        t_bar = tqdm(total=len(trainloader))
-        for batch in trainloader:# , desc='Training Epoch {}:'.format(epoch)):
+    for epoch in range(start, args.epochs+1):
+        trainloader.sampler.set_epoch(2)
+        t_bar = tqdm(total=batch_num)
+        for i_batch, batch in enumerate(trainloader):
             batch = batch.permute(1, 0, 2)
             batch_rays, target_s = batch[:2], batch[2]
 
@@ -324,13 +326,15 @@ def main(args, logger):
             global_step += 1
 
             t_bar.update(1)
-            t_bar.set_description('[TRAIN] Epoch {}/{} Loss {} PSNR {}:'.format(epoch, epochs-1, '%.4f'%loss.item(), '%.4f'%psnr.item()))
+            t_bar.set_description('[TRAIN] Epoch {}/{} LR {} Loss {} PSNR {}:'.format(epoch, args.epochs, '%.4f'%new_lrate, '%.4f'%loss.item(), '%.4f'%psnr.item()))
             t_bar.refresh()
+            if i_batch % (batch_num // 10) == 0:
+                logger.info(f"[TRAIN] Epoch: {epoch}/{args.epochs}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
             ################################
         logger.info('New Learning Rate {}'.format(new_lrate))
-        logger.info(f"[TRAIN] Epoch: {epoch}/{epochs-start}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
+        logger.info(f"[TRAIN] Epoch: {epoch}/{args.epochs}  Loss: {loss.item()}  PSNR: {psnr.item()}.")
             # Rest is logging
-        if epoch%args.i_weights==0:
+        if epoch % args.i_weights==0:
             path = os.path.join(args.basedir, args.expname, '{:06d}_{}.tar'.format(epoch, psnr.item()))
             torch.save({
                 'start': epoch,
@@ -374,6 +378,7 @@ if __name__=='__main__':
         
     os.makedirs(os.path.join(args.basedir, args.expname), exist_ok=True)
     f = os.path.join(args.basedir, args.expname, 'args.txt')
+
 
     with open(f, 'w') as file:
         for arg in sorted(vars(args)):
